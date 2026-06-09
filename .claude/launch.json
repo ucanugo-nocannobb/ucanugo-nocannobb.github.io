@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "friend-schedule",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "3131"],
+      "port": 3131
+    }
+  ]
+}
