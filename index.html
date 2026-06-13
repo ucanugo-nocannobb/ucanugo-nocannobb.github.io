@@ -8,6 +8,7 @@
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <style>
     body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
     .day-cell:hover { transform: scale(1.05); transition: transform 0.15s ease; }
@@ -30,6 +31,19 @@
         try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
       },
     };
+
+    // ── Supabase 雲端同步設定 ───────────────────────────────────────
+    // anon public key 設計上可公開；資料表已開啟 RLS（匿名讀寫共享狀態）
+    const SUPABASE_URL = 'https://hchvapxtoxdzxnxlwdfz.supabase.co';
+    const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhjaHZhcHh0b3hkenhueGx3ZGZ6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEzNjg0ODksImV4cCI6MjA5Njk0NDQ4OX0.Xl5MyPa3HDKsfdastMmo7frpZ8xf65YHoYbVOiv5Wn8';
+    const SYNC_ROW_ID  = 'main';
+    function makeSupabase() {
+      try {
+        if (window.supabase && SUPABASE_URL && SUPABASE_ANON)
+          return window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+      } catch (e) { console.warn('Supabase init failed', e); }
+      return null;
+    }
 
     // ── 常數 ─────────────────────────────────────────────────────────
     const SHIFT_TYPES  = [null, 'morning', 'mid', 'night', 'off'];
@@ -1648,10 +1662,77 @@
       const [overviewDay,   setOverviewDay]   = useState(null); // 跨人總覽
       const [sidebarOpen,   setSidebarOpen]   = useState(false); // 手機抽屜
 
-      // ── 自動存檔（任何改動即寫入 localStorage）──
+      // ── 本機自動存檔（離線快取）──
       useEffect(() => { LS.set('schedules', schedules); }, [schedules]);
       useEffect(() => { LS.set('names', names); }, [names]);
       useEffect(() => { LS.set('sharedOffDates', [...sharedOffDates]); }, [sharedOffDates]);
+
+      // ── 雲端同步（Supabase）──
+      // 'local'=未連線只用本機 / 'syncing'=連線中 / 'synced'=已同步
+      const [syncStatus, setSyncStatus] = useState('local');
+      const supaRef        = useRef(null);
+      const applyingRemote = useRef(false); // 正在套用雲端資料時，抑制回寫
+      const cloudLoaded    = useRef(false); // 首次雲端載入完成前不回寫
+      const writeTimer     = useRef(null);
+
+      // 把雲端資料套進本機 state
+      function applyRemote(d) {
+        if (!d) return;
+        applyingRemote.current = true;
+        if (d.schedules) setSchedules(d.schedules);
+        if (d.names)     setNames(d.names);
+        if (Array.isArray(d.sharedOffDates)) setSharedOffDates(new Set(d.sharedOffDates));
+        setTimeout(() => { applyingRemote.current = false; }, 60);
+      }
+
+      // 啟動：建立連線 → 載入雲端資料 → 訂閱即時更新
+      useEffect(() => {
+        const sb = makeSupabase();
+        if (!sb) { setSyncStatus('local'); return; }
+        supaRef.current = sb;
+        setSyncStatus('syncing');
+
+        (async () => {
+          try {
+            const { data } = await sb.from('shared_state').select('data')
+              .eq('id', SYNC_ROW_ID).maybeSingle();
+            const cloud = data && data.data;
+            if (cloud && Object.keys(cloud).length) {
+              applyRemote(cloud);                       // 雲端有資料 → 以雲端為準
+            } else {
+              // 雲端是空的 → 用目前本機資料當基準種子上去
+              const seed = { schedules, names, sharedOffDates: [...sharedOffDates] };
+              await sb.from('shared_state')
+                .update({ data: seed, updated_at: new Date().toISOString() })
+                .eq('id', SYNC_ROW_ID);
+            }
+          } catch (e) { console.warn('雲端載入失敗', e); }
+          cloudLoaded.current = true;
+          setSyncStatus('synced');
+        })();
+
+        const ch = sb.channel('shared_state_main')
+          .on('postgres_changes',
+            { event: '*', schema: 'public', table: 'shared_state', filter: `id=eq.${SYNC_ROW_ID}` },
+            payload => { if (payload.new && payload.new.data) applyRemote(payload.new.data); })
+          .subscribe();
+
+        return () => { try { sb.removeChannel(ch); } catch {} };
+      }, []);
+
+      // 本機資料變動 → 防抖回寫雲端（套用遠端時不回寫）
+      useEffect(() => {
+        if (!supaRef.current || !cloudLoaded.current || applyingRemote.current) return;
+        clearTimeout(writeTimer.current);
+        const snapshot = { schedules, names, sharedOffDates: [...sharedOffDates] };
+        writeTimer.current = setTimeout(async () => {
+          try {
+            await supaRef.current.from('shared_state')
+              .update({ data: snapshot, updated_at: new Date().toISOString() })
+              .eq('id', SYNC_ROW_ID);
+          } catch (e) { console.warn('雲端寫入失敗', e); }
+        }, 600);
+      }, [schedules, names, sharedOffDates]);
 
       // 取得顯示名稱（優先用自訂暱稱，否則 DEFAULT_RECIPIENTS 預設）
       function getName(id) {
@@ -1853,7 +1934,18 @@
             <div className="p-5 border-b border-gray-100 flex items-center justify-between">
               <div>
                 <h1 className="text-lg font-bold text-gray-800 tracking-tight">好友班表</h1>
-                <p className="text-xs text-gray-400 mt-0.5">共享工作排程</p>
+                <div className="flex items-center gap-1.5 mt-0.5">
+                  {syncStatus === 'synced' ? (
+                    <><span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                      <span className="text-xs text-emerald-500">雲端已同步</span></>
+                  ) : syncStatus === 'syncing' ? (
+                    <><span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
+                      <span className="text-xs text-amber-500">連線中…</span></>
+                  ) : (
+                    <><span className="w-1.5 h-1.5 rounded-full bg-gray-300"></span>
+                      <span className="text-xs text-gray-400">僅本機</span></>
+                  )}
+                </div>
               </div>
               <button onClick={() => setSidebarOpen(false)}
                 className="md:hidden text-gray-400 hover:text-gray-600 text-xl leading-none">✕</button>
