@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "影片字幕即時翻譯",
+  "version": "1.0.0",
+  "description": "看影片時即時把字幕翻譯成你選的語言，顯示雙語字幕（YouTube、Netflix、Bilibili 及一般 HTML5 影片）。",
+  "permissions": ["storage"],
+  "host_permissions": ["https://translate.googleapis.com/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "影片字幕即時翻譯", "default_popup": "popup.html" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ]
+}
